@@ -4,8 +4,10 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <mutex>
 #include <string>
 #include <string_view>
+#include <unordered_set>
 #include <vector>
 
 #include "fh2mod.h"
@@ -52,6 +54,8 @@ FH2Mod* mod = nullptr;
 std::atomic<unsigned> modelMessages{0};
 std::atomic<unsigned> controlMessages{0};
 std::atomic<unsigned> sceneMessages{0};
+std::mutex pairedBayMutex;
+std::unordered_set<std::string> pairedBayAssets;
 
 struct ScenePart {
     unsigned char* record;
@@ -100,6 +104,12 @@ bool endsWith(std::string_view text, std::string_view suffix) {
     return text.size() >= suffix.size() && text.substr(text.size() - suffix.size()) == suffix;
 }
 
+bool isBayPart(std::string_view path) {
+    const auto name = path.substr(path.find_last_of('\\') + 1);
+    return name.rfind("enginebay_", 0) == 0 || name.rfind("trunkbay_", 0) == 0 ||
+           name.rfind("trunkliner_", 0) == 0;
+}
+
 bool sameAttachment(const ScenePart& a, const ScenePart& b) {
     // Both model records carry the attachment matrix and the resolved bone ID.
     return std::memcmp(a.record + 0x1E0, b.record + 0x1E0, 64) == 0 &&
@@ -139,11 +149,39 @@ std::uintptr_t readScene(void* scene, void* reader, void* context) {
         if (replacement) {
             auto& mask = *reinterpret_cast<std::uint16_t*>(replacement->record + 0x1D2);
             mask &= ~kLod0;
+            if (isBayPart(replacement->path)) {
+                std::lock_guard<std::mutex> lock(pairedBayMutex);
+                pairedBayAssets.insert(replacement->path);
+            }
             if (sceneMessages.fetch_add(1, std::memory_order_relaxed) < 240)
                 logMask("Cleared paired stock LOD0; mask is", replacement->path.c_str(), mask);
         }
     }
     return result;
+}
+
+bool hasPairedBay(const char* path) {
+    if (!isBayPart(path))
+        return false;
+    std::lock_guard<std::mutex> lock(pairedBayMutex);
+    return pairedBayAssets.count(path) != 0;
+}
+
+void suppressParsedBay(unsigned char* model, const char* path) {
+    auto& mask = *reinterpret_cast<std::uint16_t*>(model + 6);
+    if (!(mask & kLod0) || !hasPairedBay(path))
+        return;
+    auto* mesh = *reinterpret_cast<unsigned char**>(model + 0x98);
+    const auto count = *reinterpret_cast<const std::size_t*>(model + 0xA0);
+    if (!mesh || !count || count > 4096)
+        return;
+
+    for (std::size_t index = 0; index < count; ++index, mesh += 0x1A0) {
+        auto& meshMask = *reinterpret_cast<std::uint16_t*>(mesh + 0x124);
+        meshMask &= ~kLod0;
+    }
+    mask &= ~kLod0;
+    logMask("Suppressed LOD0 meshes in paired bay; mask is", path, mask);
 }
 
 std::uintptr_t readSceneModel(void* record, void* reader, void* context) {
@@ -235,8 +273,11 @@ bool observeModel(void* model, void* bundle, const void* member) {
     if (!member || !copyAssetPath(reinterpret_cast<const unsigned char*>(
             reinterpret_cast<std::uintptr_t>(member) - 0x38), path, sizeof path))
         return true;
-    if (isCarModel(path))
-        promoteParsedModel(static_cast<unsigned char*>(model), path);
+    if (isCarModel(path)) {
+        auto* bytes = static_cast<unsigned char*>(model);
+        promoteParsedModel(bytes, path);
+        suppressParsedBay(bytes, path);
+    }
     const auto mask = *reinterpret_cast<const std::uint16_t*>(
         static_cast<const unsigned char*>(model) + 6);
     const bool car = std::strstr(path, "\\cars\\") != nullptr;
@@ -313,7 +354,9 @@ FH2MOD_EXPORT int fh2mod_init(const FH2ModApi* api) {
     FH2ModInfo info{};
     info.size = sizeof info;
     info.name = "FH2_AutovistaLayer";
-    info.version = "0.3.0";
+    info.version = "0.3.1";
+    info.github_repo = "suderek22/FH2_AutovistaLayer";
+    info.check_updates = 1;
     info.description = "Includes showroom geometry when the game renders a car at LOD0.";
     mod = api->register_mod(&info);
     if (!mod)
