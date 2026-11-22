@@ -18,6 +18,7 @@ v0.3.1 fixed issue #1 with overlapping LOD0 and LODS engine/ trunk bays. Now it 
 
 - Forza Horizon 2 running in Azimuth. Verified with Azimuth 1.0.4 and FH2 Mod Platform 2.9.1.
 - Set **Car Detail** to **Ultra** in Azimuth to use LOD0 in gameplay.
+- Set **Shadow Detail** to **High or Ultra** in Azimuth render engine bays correctly.
 
 ## Installation
 
