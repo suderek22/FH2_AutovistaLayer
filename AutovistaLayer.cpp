@@ -54,8 +54,8 @@ FH2Mod* mod = nullptr;
 std::atomic<unsigned> modelMessages{0};
 std::atomic<unsigned> controlMessages{0};
 std::atomic<unsigned> sceneMessages{0};
-std::mutex pairedBayMutex;
-std::unordered_set<std::string> pairedBayAssets;
+std::mutex pairedPartMutex;
+std::unordered_set<std::string> pairedPartAssets;
 
 struct ScenePart {
     unsigned char* record;
@@ -104,9 +104,9 @@ bool endsWith(std::string_view text, std::string_view suffix) {
     return text.size() >= suffix.size() && text.substr(text.size() - suffix.size()) == suffix;
 }
 
-bool isBayPart(std::string_view path) {
+bool supportsMeshSuppression(std::string_view path) {
     const auto name = path.substr(path.find_last_of('\\') + 1);
-    return name.rfind("enginebay_", 0) == 0 || name.rfind("trunkbay_", 0) == 0 ||
+    return name == "engine_a.modelbin" || name.rfind("enginebay_", 0) == 0 || name.rfind("trunkbay_", 0) == 0 ||
            name.rfind("trunkliner_", 0) == 0;
 }
 
@@ -147,11 +147,19 @@ std::uintptr_t readScene(void* scene, void* reader, void* context) {
             replacement = &stock;
         }
         if (replacement) {
+            const std::string_view stockName = std::string_view(replacement->path).substr(
+                replacement->path.find_last_of('\\') + 1);
+            // A hood or liner already present in the native showroom layer
+            // can share that layer with a separate strut or hinge model.
+            if ((replacement->originalMask & kShowroom) &&
+                (stockName.rfind("hood_", 0) == 0 || stockName.rfind("hoodliner_", 0) == 0))
+                continue;
+
             auto& mask = *reinterpret_cast<std::uint16_t*>(replacement->record + 0x1D2);
             mask &= ~kLod0;
-            if (isBayPart(replacement->path)) {
-                std::lock_guard<std::mutex> lock(pairedBayMutex);
-                pairedBayAssets.insert(replacement->path);
+            if (supportsMeshSuppression(replacement->path)) {
+                std::lock_guard<std::mutex> lock(pairedPartMutex);
+                pairedPartAssets.insert(replacement->path);
             }
             if (sceneMessages.fetch_add(1, std::memory_order_relaxed) < 240)
                 logMask("Cleared paired stock LOD0; mask is", replacement->path.c_str(), mask);
@@ -160,16 +168,16 @@ std::uintptr_t readScene(void* scene, void* reader, void* context) {
     return result;
 }
 
-bool hasPairedBay(const char* path) {
-    if (!isBayPart(path))
+bool hasPairedReplacement(const char* path) {
+    if (!supportsMeshSuppression(path))
         return false;
-    std::lock_guard<std::mutex> lock(pairedBayMutex);
-    return pairedBayAssets.count(path) != 0;
+    std::lock_guard<std::mutex> lock(pairedPartMutex);
+    return pairedPartAssets.count(path) != 0;
 }
 
-void suppressParsedBay(unsigned char* model, const char* path) {
+void suppressPairedLod0(unsigned char* model, const char* path) {
     auto& mask = *reinterpret_cast<std::uint16_t*>(model + 6);
-    if (!(mask & kLod0) || !hasPairedBay(path))
+    if (!(mask & kLod0) || !hasPairedReplacement(path))
         return;
     auto* mesh = *reinterpret_cast<unsigned char**>(model + 0x98);
     const auto count = *reinterpret_cast<const std::size_t*>(model + 0xA0);
@@ -181,7 +189,7 @@ void suppressParsedBay(unsigned char* model, const char* path) {
         meshMask &= ~kLod0;
     }
     mask &= ~kLod0;
-    logMask("Suppressed LOD0 meshes in paired bay; mask is", path, mask);
+    logMask("Suppressed LOD0 meshes in paired model; mask is", path, mask);
 }
 
 std::uintptr_t readSceneModel(void* record, void* reader, void* context) {
@@ -276,7 +284,7 @@ bool observeModel(void* model, void* bundle, const void* member) {
     if (isCarModel(path)) {
         auto* bytes = static_cast<unsigned char*>(model);
         promoteParsedModel(bytes, path);
-        suppressParsedBay(bytes, path);
+        suppressPairedLod0(bytes, path);
     }
     const auto mask = *reinterpret_cast<const std::uint16_t*>(
         static_cast<const unsigned char*>(model) + 6);
@@ -354,7 +362,7 @@ FH2MOD_EXPORT int fh2mod_init(const FH2ModApi* api) {
     FH2ModInfo info{};
     info.size = sizeof info;
     info.name = "FH2_AutovistaLayer";
-    info.version = "0.3.1";
+    info.version = "0.3.2-RC2";
     info.github_repo = "suderek22/FH2_AutovistaLayer";
     info.check_updates = 1;
     info.description = "Includes showroom geometry when the game renders a car at LOD0.";
