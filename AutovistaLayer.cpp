@@ -296,7 +296,12 @@ bool isReviewedFlatMesh(const unsigned char* mesh, std::string_view path, std::u
         if (rule.path != path || rule.material != material || !(rule.mask & mask))
             continue;
         char name[256];
-        if (copyAssetPath(mesh + 0x100, name, sizeof name) && rule.name == name)
+        if (!copyAssetPath(mesh + 0x100, name, sizeof name))
+            continue;
+        std::string_view meshName(name);
+        while (!meshName.empty() && meshName.back() == ' ')
+            meshName.remove_suffix(1);
+        if (rule.name == meshName)
             return true;
     }
     return false;
@@ -469,7 +474,7 @@ FH2MOD_EXPORT int fh2mod_init(const FH2ModApi* api) {
     FH2ModInfo info{};
     info.size = sizeof info;
     info.name = "FH2_AutovistaLayer";
-    info.version = "0.3.2-RC5";
+    info.version = "0.3.2-RC7";
     info.github_repo = "suderek22/FH2_AutovistaLayer";
     info.check_updates = 1;
     info.description = "Includes showroom geometry when the game renders a car at LOD0.";
