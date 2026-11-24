@@ -38,6 +38,7 @@ constexpr std::uint16_t kShowroom = 1;
 constexpr std::uint16_t kLod0 = 2;
 constexpr std::string_view kCarsRoot = "game:\\media\\cars\\";
 constexpr std::string_view kShowroomSuffix = "__slod.modelbin";
+constexpr std::string_view kViperScene = "game:\\media\\cars\\vip_viper_13\\scene\\";
 
 using ParseModel = bool (*)(void*, void*, const void*);
 using ApplyRenderMode = void (*)(void*);
@@ -54,8 +55,8 @@ FH2Mod* mod = nullptr;
 std::atomic<unsigned> modelMessages{0};
 std::atomic<unsigned> controlMessages{0};
 std::atomic<unsigned> sceneMessages{0};
-std::mutex pairedBayMutex;
-std::unordered_set<std::string> pairedBayAssets;
+std::mutex pairedPartMutex;
+std::unordered_set<std::string> pairedPartAssets;
 
 struct ScenePart {
     unsigned char* record;
@@ -104,10 +105,15 @@ bool endsWith(std::string_view text, std::string_view suffix) {
     return text.size() >= suffix.size() && text.substr(text.size() - suffix.size()) == suffix;
 }
 
-bool isBayPart(std::string_view path) {
+bool isViperPart(std::string_view path, std::string_view part) {
+    return path.rfind(kViperScene, 0) == 0 && path.substr(kViperScene.size()) == part;
+}
+
+bool supportsMeshSuppression(std::string_view path) {
     const auto name = path.substr(path.find_last_of('\\') + 1);
-    return name.rfind("enginebay_", 0) == 0 || name.rfind("trunkbay_", 0) == 0 ||
-           name.rfind("trunkliner_", 0) == 0;
+    return name == "engine_a.modelbin" || name.rfind("enginebay_", 0) == 0 || name.rfind("trunkbay_", 0) == 0 ||
+           name.rfind("trunkliner_", 0) == 0 || name.rfind("hoodliner_", 0) == 0 ||
+           isViperPart(path, "exterior\\hood\\hood_a.modelbin");
 }
 
 bool sameAttachment(const ScenePart& a, const ScenePart& b) {
@@ -132,10 +138,23 @@ std::uintptr_t readScene(void* scene, void* reader, void* context) {
     sceneParts = previous;
 
     for (const auto& showroom : parts) {
-        if (showroom.originalMask != kShowroom || !endsWith(showroom.path, kShowroomSuffix))
+        if (showroom.originalMask != kShowroom)
             continue;
-        std::string stockPath = showroom.path.substr(0, showroom.path.size() - kShowroomSuffix.size());
-        stockPath += ".modelbin";
+        // The Viper's showroom trunk liner is just the hatch struts.
+        if (isViperPart(showroom.path, "exterior\\trunk\\trunkliner_a__slod.modelbin"))
+            continue;
+        if (isViperPart(showroom.path, "exterior\\hood\\hoodhoneycomb_a__slod.modelbin")) {
+            std::lock_guard<std::mutex> lock(pairedPartMutex);
+            pairedPartAssets.insert(std::string(kViperScene) + "exterior\\hood\\hood_a.modelbin");
+            continue;
+        }
+        const bool viperEngine = isViperPart(showroom.path, "exterior\\engine\\engine_a.modelbin");
+        if (!viperEngine && !endsWith(showroom.path, kShowroomSuffix))
+            continue;
+        // This showroom engine includes the bay under a different filename.
+        std::string stockPath = viperEngine
+            ? std::string(kViperScene) + "exterior\\engine\\enginebay_a.modelbin"
+            : showroom.path.substr(0, showroom.path.size() - kShowroomSuffix.size()) + ".modelbin";
         const ScenePart* replacement = nullptr;
         for (const auto& stock : parts) {
             if (stock.path != stockPath || !(stock.originalMask & kLod0) || !sameAttachment(showroom, stock))
@@ -147,11 +166,19 @@ std::uintptr_t readScene(void* scene, void* reader, void* context) {
             replacement = &stock;
         }
         if (replacement) {
+            const std::string_view stockName = std::string_view(replacement->path).substr(
+                replacement->path.find_last_of('\\') + 1);
+            // A hood or liner already present in the native showroom layer
+            // can share that layer with a separate strut or hinge model.
+            if ((replacement->originalMask & kShowroom) &&
+                (stockName.rfind("hood_", 0) == 0 || stockName.rfind("hoodliner_", 0) == 0))
+                continue;
+
             auto& mask = *reinterpret_cast<std::uint16_t*>(replacement->record + 0x1D2);
             mask &= ~kLod0;
-            if (isBayPart(replacement->path)) {
-                std::lock_guard<std::mutex> lock(pairedBayMutex);
-                pairedBayAssets.insert(replacement->path);
+            if (supportsMeshSuppression(replacement->path)) {
+                std::lock_guard<std::mutex> lock(pairedPartMutex);
+                pairedPartAssets.insert(replacement->path);
             }
             if (sceneMessages.fetch_add(1, std::memory_order_relaxed) < 240)
                 logMask("Cleared paired stock LOD0; mask is", replacement->path.c_str(), mask);
@@ -160,28 +187,41 @@ std::uintptr_t readScene(void* scene, void* reader, void* context) {
     return result;
 }
 
-bool hasPairedBay(const char* path) {
-    if (!isBayPart(path))
+bool hasPairedReplacement(const char* path) {
+    if (!supportsMeshSuppression(path))
         return false;
-    std::lock_guard<std::mutex> lock(pairedBayMutex);
-    return pairedBayAssets.count(path) != 0;
+    std::lock_guard<std::mutex> lock(pairedPartMutex);
+    return pairedPartAssets.count(path) != 0;
 }
 
-void suppressParsedBay(unsigned char* model, const char* path) {
+void suppressPairedLod0(unsigned char* model, const char* path) {
     auto& mask = *reinterpret_cast<std::uint16_t*>(model + 6);
-    if (!(mask & kLod0) || !hasPairedBay(path))
+    if (!(mask & kLod0) || !hasPairedReplacement(path))
         return;
     auto* mesh = *reinterpret_cast<unsigned char**>(model + 0x98);
     const auto count = *reinterpret_cast<const std::size_t*>(model + 0xA0);
     if (!mesh || !count || count > 4096)
         return;
 
+    const bool honeycombOnly = isViperPart(path, "exterior\\hood\\hood_a.modelbin");
+    bool suppressed = false;
     for (std::size_t index = 0; index < count; ++index, mesh += 0x1A0) {
         auto& meshMask = *reinterpret_cast<std::uint16_t*>(mesh + 0x124);
+        if (!(meshMask & kLod0))
+            continue;
+        if (honeycombOnly) {
+            char name[256];
+            if (!copyAssetPath(mesh + 0x100, name, sizeof name) ||
+                std::strcmp(name, "hoodhoneycomb_a_lod0") != 0)
+                continue;
+        }
         meshMask &= ~kLod0;
+        suppressed = true;
     }
-    mask &= ~kLod0;
-    logMask("Suppressed LOD0 meshes in paired bay; mask is", path, mask);
+    if (!honeycombOnly)
+        mask &= ~kLod0;
+    if (suppressed)
+        logMask("Suppressed LOD0 meshes in paired model; mask is", path, mask);
 }
 
 std::uintptr_t readSceneModel(void* record, void* reader, void* context) {
@@ -276,7 +316,7 @@ bool observeModel(void* model, void* bundle, const void* member) {
     if (isCarModel(path)) {
         auto* bytes = static_cast<unsigned char*>(model);
         promoteParsedModel(bytes, path);
-        suppressParsedBay(bytes, path);
+        suppressPairedLod0(bytes, path);
     }
     const auto mask = *reinterpret_cast<const std::uint16_t*>(
         static_cast<const unsigned char*>(model) + 6);
@@ -354,7 +394,7 @@ FH2MOD_EXPORT int fh2mod_init(const FH2ModApi* api) {
     FH2ModInfo info{};
     info.size = sizeof info;
     info.name = "FH2_AutovistaLayer";
-    info.version = "0.3.1";
+    info.version = "0.3.2-RC3";
     info.github_repo = "suderek22/FH2_AutovistaLayer";
     info.check_updates = 1;
     info.description = "Includes showroom geometry when the game renders a car at LOD0.";
