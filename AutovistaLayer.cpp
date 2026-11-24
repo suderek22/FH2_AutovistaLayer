@@ -1,5 +1,6 @@
 #include <windows.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cstdint>
 #include <cstdio>
@@ -39,6 +40,8 @@ constexpr std::uint16_t kLod0 = 2;
 constexpr std::string_view kCarsRoot = "game:\\media\\cars\\";
 constexpr std::string_view kShowroomSuffix = "__slod.modelbin";
 constexpr std::string_view kViperScene = "game:\\media\\cars\\vip_viper_13\\scene\\";
+
+#include "ReviewedParts.h"
 
 using ParseModel = bool (*)(void*, void*, const void*);
 using ApplyRenderMode = void (*)(void*);
@@ -137,6 +140,8 @@ bool supportsMeshSuppression(std::string_view path) {
     const auto name = path.substr(path.find_last_of('\\') + 1);
     return name == "engine_a.modelbin" || name.rfind("enginebay_", 0) == 0 || name.rfind("trunkbay_", 0) == 0 ||
            name.rfind("trunkliner_", 0) == 0 || name.rfind("hoodliner_", 0) == 0 ||
+           name == "enginebay.modelbin" || name.rfind("trunkbayf_", 0) == 0 ||
+           name.rfind("storage", 0) == 0 ||
            isViperPart(path, "exterior\\hood\\hood_a.modelbin");
 }
 
@@ -165,7 +170,8 @@ std::uintptr_t readScene(void* scene, void* reader, void* context) {
         if (showroom.originalMask != kShowroom)
             continue;
         // The Viper's showroom trunk liner is just the hatch struts.
-        if (isViperPart(showroom.path, "exterior\\trunk\\trunkliner_a__slod.modelbin"))
+        if (isViperPart(showroom.path, "exterior\\trunk\\trunkliner_a__slod.modelbin") ||
+            std::find(std::begin(kAdditiveShowroomParts), std::end(kAdditiveShowroomParts), showroom.path) != std::end(kAdditiveShowroomParts))
             continue;
         if (isViperPart(showroom.path, "exterior\\hood\\hoodhoneycomb_a__slod.modelbin")) {
             std::lock_guard<std::mutex> lock(pairedPartMutex);
@@ -176,12 +182,16 @@ std::uintptr_t readScene(void* scene, void* reader, void* context) {
         constexpr std::string_view rsxScene = "game:\\media\\cars\\acu_rsxtypes_02\\scene\\";
         const bool engineContainsBay = isViperPart(showroom.path, enginePath) ||
             (showroom.path.rfind(rsxScene, 0) == 0 && showroom.path.substr(rsxScene.size()) == enginePath);
-        if (!engineContainsBay && !endsWith(showroom.path, kShowroomSuffix))
+        const auto reviewed = std::find_if(std::begin(kReviewedPairs), std::end(kReviewedPairs),
+            [&](const auto& pair) { return pair.showroom == showroom.path; });
+        if (reviewed == std::end(kReviewedPairs) && !engineContainsBay && !endsWith(showroom.path, kShowroomSuffix))
             continue;
         // These showroom engines include the bay under a different filename.
         std::string stockPath = engineContainsBay
             ? showroom.path.substr(0, showroom.path.find_last_of('\\') + 1) + "enginebay_a.modelbin"
             : showroom.path.substr(0, showroom.path.size() - kShowroomSuffix.size()) + ".modelbin";
+        if (reviewed != std::end(kReviewedPairs))
+            stockPath = reviewed->stock;
         const ScenePart* replacement = nullptr;
         for (const auto& stock : parts) {
             if (stock.path != stockPath || !(stock.originalMask & kLod0) || !sameAttachment(showroom, stock))
@@ -264,6 +274,15 @@ std::uintptr_t readSceneModel(void* record, void* reader, void* context) {
     if (sceneParts && (mask == kShowroom || (mask & kLod0)))
         sceneParts->push_back({bytes, path, mask});
     if (mask == kShowroom) {
+        // The RS 6 engine is authored for the shadow pass only.
+        if (std::string_view(path) == "game:\\media\\cars\\aud_rs6_15\\scene\\exterior\\engine\\engine_a.modelbin") {
+            auto& drawGroups = *reinterpret_cast<std::uint32_t*>(bytes + 0x1D4);
+            if (drawGroups == 4) {
+                drawGroups |= 1;
+                if (debugLog.load())
+                    logMask("Enabled exterior draw group for", path, static_cast<std::uint16_t>(drawGroups));
+            }
+        }
         mask |= kLod0;
         if (debugLog.load() && sceneMessages.fetch_add(1, std::memory_order_relaxed) < 240)
             logMask("Promoted car-scene LOD mask to", path, mask);
@@ -271,9 +290,23 @@ std::uintptr_t readSceneModel(void* record, void* reader, void* context) {
     return result;
 }
 
+bool isReviewedFlatMesh(const unsigned char* mesh, std::string_view path, std::uint16_t mask) {
+    const auto material = *reinterpret_cast<const std::uint16_t*>(mesh + 0x120);
+    for (const auto& rule : kReviewedFlatMeshes) {
+        if (rule.path != path || rule.material != material || !(rule.mask & mask))
+            continue;
+        char name[256];
+        if (copyAssetPath(mesh + 0x100, name, sizeof name) && rule.name == name)
+            return true;
+    }
+    return false;
+}
+
 void promoteParsedModel(unsigned char* model, const char* path) {
     auto& mask = *reinterpret_cast<std::uint16_t*>(model + 6);
-    if (!(mask & kShowroom))
+    const bool hasShowroom = (mask & kShowroom) != 0;
+    if (!hasShowroom && std::none_of(std::begin(kReviewedFlatMeshes), std::end(kReviewedFlatMeshes),
+        [&](const auto& rule) { return rule.path == path; }))
         return;
     auto* mesh = *reinterpret_cast<unsigned char**>(model + 0x98);
     const auto count = *reinterpret_cast<const std::size_t*>(model + 0xA0);
@@ -281,7 +314,7 @@ void promoteParsedModel(unsigned char* model, const char* path) {
         return;
 
     std::vector<std::string> lod0Names;
-    if (mask & kLod0) {
+    if (hasShowroom && (mask & kLod0)) {
         for (std::size_t index = 0; index < count; ++index) {
             const auto* candidate = mesh + index * 0x1A0;
             if (!(*reinterpret_cast<const std::uint16_t*>(candidate + 0x124) & kLod0))
@@ -302,6 +335,13 @@ void promoteParsedModel(unsigned char* model, const char* path) {
     for (std::size_t index = 0; index < count; ++index, mesh += 0x1A0) {
         const auto material = *reinterpret_cast<const std::uint16_t*>(mesh + 0x120);
         auto& meshMask = *reinterpret_cast<std::uint16_t*>(mesh + 0x124);
+        if (isReviewedFlatMesh(mesh, path, meshMask)) {
+            // Keep native showroom use of this mesh, but exclude it from gameplay LOD0.
+            meshMask &= ~kLod0;
+            if (debugLog.load())
+                logMask("Excluded flat mesh from LOD0 in", path, meshMask);
+            continue;
+        }
         if (material == 0xFFFF || meshMask != kShowroom || mesh[0x126] != 0xFF || mesh[0x127] != 0xFF)
             continue;
         if (mask & kLod0) {
@@ -429,7 +469,7 @@ FH2MOD_EXPORT int fh2mod_init(const FH2ModApi* api) {
     FH2ModInfo info{};
     info.size = sizeof info;
     info.name = "FH2_AutovistaLayer";
-    info.version = "0.3.2-RC4";
+    info.version = "0.3.2-RC5";
     info.github_repo = "suderek22/FH2_AutovistaLayer";
     info.check_updates = 1;
     info.description = "Includes showroom geometry when the game renders a car at LOD0.";
