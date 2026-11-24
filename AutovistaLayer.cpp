@@ -52,6 +52,10 @@ ReadSceneModel originalReadScene = nullptr;
 const void* autovistaControlVtable = nullptr;
 const FH2ModApi* platform = nullptr;
 FH2Mod* mod = nullptr;
+std::atomic<bool> debugLog{false};
+std::wstring settingsPath;
+std::mutex summaryMutex;
+std::unordered_set<std::string> loggedCars;
 std::atomic<unsigned> modelMessages{0};
 std::atomic<unsigned> controlMessages{0};
 std::atomic<unsigned> sceneMessages{0};
@@ -94,6 +98,26 @@ void logMask(const char* label, const char* path, std::uint16_t mask) {
     std::snprintf(message, sizeof message, "%s 0x%04X: %s",
                   label, static_cast<unsigned>(mask), path);
     platform->log(mod, message);
+}
+
+void logAppliedCar(std::string_view path) {
+    const auto separator = path.find('\\', kCarsRoot.size());
+    if (separator == std::string_view::npos || separator == kCarsRoot.size())
+        return;
+    const std::string car(path.substr(kCarsRoot.size(), separator - kCarsRoot.size()));
+    {
+        std::lock_guard<std::mutex> lock(summaryMutex);
+        if (!loggedCars.insert(car).second)
+            return;
+    }
+    const std::string message = "Applied showroom LOD to " + car;
+    platform->log(mod, message.c_str());
+}
+
+void changeDebugLog(void*, const char*, int value) {
+    debugLog.store(value != 0);
+    if (!WritePrivateProfileStringW(L"Logging", L"DebugLog", value ? L"1" : L"0", settingsPath.c_str()))
+        platform->log(mod, "Could not save the Debug log setting.");
 }
 
 bool isCarModel(std::string_view path) {
@@ -148,12 +172,15 @@ std::uintptr_t readScene(void* scene, void* reader, void* context) {
             pairedPartAssets.insert(std::string(kViperScene) + "exterior\\hood\\hood_a.modelbin");
             continue;
         }
-        const bool viperEngine = isViperPart(showroom.path, "exterior\\engine\\engine_a.modelbin");
-        if (!viperEngine && !endsWith(showroom.path, kShowroomSuffix))
+        constexpr std::string_view enginePath = "exterior\\engine\\engine_a.modelbin";
+        constexpr std::string_view rsxScene = "game:\\media\\cars\\acu_rsxtypes_02\\scene\\";
+        const bool engineContainsBay = isViperPart(showroom.path, enginePath) ||
+            (showroom.path.rfind(rsxScene, 0) == 0 && showroom.path.substr(rsxScene.size()) == enginePath);
+        if (!engineContainsBay && !endsWith(showroom.path, kShowroomSuffix))
             continue;
-        // This showroom engine includes the bay under a different filename.
-        std::string stockPath = viperEngine
-            ? std::string(kViperScene) + "exterior\\engine\\enginebay_a.modelbin"
+        // These showroom engines include the bay under a different filename.
+        std::string stockPath = engineContainsBay
+            ? showroom.path.substr(0, showroom.path.find_last_of('\\') + 1) + "enginebay_a.modelbin"
             : showroom.path.substr(0, showroom.path.size() - kShowroomSuffix.size()) + ".modelbin";
         const ScenePart* replacement = nullptr;
         for (const auto& stock : parts) {
@@ -180,7 +207,7 @@ std::uintptr_t readScene(void* scene, void* reader, void* context) {
                 std::lock_guard<std::mutex> lock(pairedPartMutex);
                 pairedPartAssets.insert(replacement->path);
             }
-            if (sceneMessages.fetch_add(1, std::memory_order_relaxed) < 240)
+            if (debugLog.load() && sceneMessages.fetch_add(1, std::memory_order_relaxed) < 240)
                 logMask("Cleared paired stock LOD0; mask is", replacement->path.c_str(), mask);
         }
     }
@@ -220,7 +247,7 @@ void suppressPairedLod0(unsigned char* model, const char* path) {
     }
     if (!honeycombOnly)
         mask &= ~kLod0;
-    if (suppressed)
+    if (suppressed && debugLog.load())
         logMask("Suppressed LOD0 meshes in paired model; mask is", path, mask);
 }
 
@@ -238,7 +265,7 @@ std::uintptr_t readSceneModel(void* record, void* reader, void* context) {
         sceneParts->push_back({bytes, path, mask});
     if (mask == kShowroom) {
         mask |= kLod0;
-        if (sceneMessages.fetch_add(1, std::memory_order_relaxed) < 240)
+        if (debugLog.load() && sceneMessages.fetch_add(1, std::memory_order_relaxed) < 240)
             logMask("Promoted car-scene LOD mask to", path, mask);
     }
     return result;
@@ -298,7 +325,9 @@ void promoteParsedModel(unsigned char* model, const char* path) {
         if (model[1] == 0xFF)
             model[1] = 0;
         mask |= kLod0;
-        if (modelMessages.fetch_add(1, std::memory_order_relaxed) < 240)
+        if (!debugLog.load())
+            logAppliedCar(path);
+        else if (modelMessages.fetch_add(1, std::memory_order_relaxed) < 240)
             logMask("Promoted parsed model LOD mask to", path, mask);
     }
 }
@@ -318,6 +347,8 @@ bool observeModel(void* model, void* bundle, const void* member) {
         promoteParsedModel(bytes, path);
         suppressPairedLod0(bytes, path);
     }
+    if (!debugLog.load())
+        return true;
     const auto mask = *reinterpret_cast<const std::uint16_t*>(
         static_cast<const unsigned char*>(model) + 6);
     const bool car = std::strstr(path, "\\cars\\") != nullptr;
@@ -333,6 +364,10 @@ bool observeModel(void* model, void* bundle, const void* member) {
 }
 
 void observeRenderMode(void* renderer) {
+    if (!debugLog.load()) {
+        originalApplyRenderMode(renderer);
+        return;
+    }
     // Both the stateflow setter and direct callers reach this function.
     const auto* bytes = static_cast<const unsigned char*>(renderer);
     const int mode = *reinterpret_cast<const int*>(bytes + 0x3CC);
@@ -346,7 +381,7 @@ void observeRenderMode(void* renderer) {
 
 std::uintptr_t observeControl(void* control, void* reader) {
     const auto result = originalReadControl(control, reader);
-    if (*static_cast<const void* const*>(control) == autovistaControlVtable &&
+    if (debugLog.load() && *static_cast<const void* const*>(control) == autovistaControlVtable &&
         controlMessages.fetch_add(1, std::memory_order_relaxed) < 32) {
         const auto value = static_cast<const unsigned char*>(control)[8];
         char message[80];
@@ -394,7 +429,7 @@ FH2MOD_EXPORT int fh2mod_init(const FH2ModApi* api) {
     FH2ModInfo info{};
     info.size = sizeof info;
     info.name = "FH2_AutovistaLayer";
-    info.version = "0.3.2-RC3";
+    info.version = "0.3.2-RC4";
     info.github_repo = "suderek22/FH2_AutovistaLayer";
     info.check_updates = 1;
     info.description = "Includes showroom geometry when the game renders a car at LOD0.";
@@ -402,6 +437,19 @@ FH2MOD_EXPORT int fh2mod_init(const FH2ModApi* api) {
     if (!mod)
         return 1;
     platform = api;
+    if (api->api_version >= 5 && api->add_setting && api->azimuth_dir) {
+        settingsPath = std::wstring(api->azimuth_dir) + L"\\fh2-mods\\FH2_AutovistaLayer.ini";
+        debugLog.store(GetPrivateProfileIntW(L"Logging", L"DebugLog", 0, settingsPath.c_str()) != 0);
+        FH2Setting setting{};
+        setting.size = sizeof setting;
+        setting.key = "DebugLog";
+        setting.label = "Debug log";
+        setting.description = "Log individual parts and render modes. Off logs one line per car per session.";
+        setting.value = debugLog.load() ? 1 : 0;
+        setting.on_change = changeDebugLog;
+        if (!api->add_setting(mod, &setting))
+            platform->log(mod, "Could not register the Debug log setting.");
+    }
     HANDLE worker = CreateThread(nullptr, 0, install, nullptr, 0, nullptr);
     if (!worker)
         return 1;
