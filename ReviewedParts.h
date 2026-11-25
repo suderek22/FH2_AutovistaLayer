@@ -84,6 +84,7 @@ struct ReviewedMesh { std::string_view path; std::string_view name; std::uint16_
 constexpr ReviewedMesh kReviewedFlatMeshes[] = {
     {"game:\\media\\cars\\jag_xj220_93\\scene\\exterior\\engine\\engine_a.modelbin", "engine_a_lod0", 32, 2},
     {"game:\\media\\cars\\jag_xj220_93\\scene\\exterior\\engine\\engine_a.modelbin", "enginebay_a_lods0", 32, 2},
+    {"game:\\media\\cars\\mcl_p1_13\\scene\\exterior\\engine\\enginebay_a.modelbin", "enginebay_a_lod0", 0, 2},
     {"game:\\media\\cars\\mer_slsamg_11\\scene\\exterior\\engine\\engine_a.modelbin", "engine_a_lods", 0, 1},
     {"game:\\media\\cars\\por_959_87\\scene\\exterior\\engine\\enginebay_a.modelbin", "enginebay_a_lod0", 4, 2},
     {"game:\\media\\cars\\por_mecanturbo_15\\scene\\exterior\\engine\\engine_a.modelbin", "enginebay_a_lods", 20, 1},
