@@ -59,7 +59,7 @@ const void* autovistaControlVtable = nullptr;
 const FH2ModApi* platform = nullptr;
 FH2Mod* mod = nullptr;
 std::atomic<bool> debugLog{false};
-bool autoshowPreview = false;
+bool autoshowPreview = true;
 std::wstring settingsPath;
 std::mutex summaryMutex;
 std::unordered_set<std::string> loggedCars;
@@ -125,6 +125,11 @@ void changeDebugLog(void*, const char*, int value) {
     debugLog.store(value != 0);
     if (!WritePrivateProfileStringW(L"Logging", L"DebugLog", value ? L"1" : L"0", settingsPath.c_str()))
         platform->log(mod, "Could not save the Debug log setting.");
+}
+
+void changeAutoshowPreview(void*, const char*, int value) {
+    if (!WritePrivateProfileStringW(L"Autoshow", L"Preview", value ? L"1" : L"0", settingsPath.c_str()))
+        platform->log(mod, "Could not save the Autoshow preview setting.");
 }
 
 bool isCarModel(std::string_view path) {
@@ -490,7 +495,7 @@ FH2MOD_EXPORT int fh2mod_init(const FH2ModApi* api) {
     platform = api;
     if (api->azimuth_dir && *api->azimuth_dir) {
         settingsPath = std::wstring(api->azimuth_dir) + L"\\fh2-mods\\FH2_AutovistaLayer.ini";
-        autoshowPreview = GetPrivateProfileIntW(L"Autoshow", L"Preview", 0, settingsPath.c_str()) != 0;
+        autoshowPreview = GetPrivateProfileIntW(L"Autoshow", L"Preview", 1, settingsPath.c_str()) != 0;
         debugLog.store(GetPrivateProfileIntW(L"Logging", L"DebugLog", 0, settingsPath.c_str()) != 0);
     }
     if (autoshowPreview && !installAutoshowPrompt(api, mod))
@@ -505,6 +510,17 @@ FH2MOD_EXPORT int fh2mod_init(const FH2ModApi* api) {
         setting.on_change = changeDebugLog;
         if (!api->add_setting(mod, &setting))
             platform->log(mod, "Could not register the Debug log setting.");
+
+        FH2Setting previewSetting{};
+        previewSetting.size = sizeof previewSetting;
+        previewSetting.key = "AutoshowPreview";
+        previewSetting.label = "Autoshow preview";
+        previewSetting.description = "Enable showroom detail and the Y Explode toggle in the final Autoshow purchase preview.";
+        previewSetting.value = autoshowPreview ? 1 : 0;
+        previewSetting.needs_restart = 1;
+        previewSetting.on_change = changeAutoshowPreview;
+        if (!api->add_setting(mod, &previewSetting))
+            platform->log(mod, "Could not register the Autoshow preview setting.");
     }
     HANDLE worker = CreateThread(nullptr, 0, install, nullptr, 0, nullptr);
     if (!worker)
