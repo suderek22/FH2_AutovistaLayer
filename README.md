@@ -1,4 +1,4 @@
-# FH2_AutovistaLayer 0.4.0
+# FH2_AutovistaLayer 0.4.1
 
 **Author** · suderek22
 
@@ -24,6 +24,13 @@ Preview=1
 ```
 
 After choosing the car and its colour, the final purchase preview requests LOD0 with the available showroom geometry. Press **Y** to Explode and press **Y** again to Implode.
+The same toggle is available in the Garage's **View Car** screen. The Autoshow setting applies to the purchase preview.
+
+## Changes in 0.4.1
+
+- Added **Y · Explode** to Garage inspection.
+- Updated the Traditional Chinese, Czech, Spanish (Spain), Spanish (Mexico), and Hungarian Explode labels on FH2 Mod Platform 2.9.1.
+- Retained the Ferrari Enzo's engine-bay lining when rendering the detailed engine.
 
 ## Changes in 0.3.3
 
