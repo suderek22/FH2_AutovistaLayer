@@ -13,6 +13,9 @@
 
 #include "fh2mod.h"
 
+void installAutoshowPreview(const FH2ModApi*, FH2Mod*, unsigned char*);
+bool installAutoshowPrompt(const FH2ModApi*, FH2Mod*);
+
 namespace {
 constexpr std::uintptr_t kParseModelRva = 0x13F1D70;
 constexpr std::uintptr_t kApplyRenderModeRva = 0xF908D0;
@@ -56,6 +59,7 @@ const void* autovistaControlVtable = nullptr;
 const FH2ModApi* platform = nullptr;
 FH2Mod* mod = nullptr;
 std::atomic<bool> debugLog{false};
+bool autoshowPreview = false;
 std::wstring settingsPath;
 std::mutex summaryMutex;
 std::unordered_set<std::string> loggedCars;
@@ -464,6 +468,8 @@ DWORD WINAPI install(void*) {
         return 0;
     }
     platform->log(mod, "Runtime showroom LOD promotion active.");
+    if (autoshowPreview)
+        installAutoshowPreview(platform, mod, game);
     return 0;
 }
 }
@@ -474,7 +480,7 @@ FH2MOD_EXPORT int fh2mod_init(const FH2ModApi* api) {
     FH2ModInfo info{};
     info.size = sizeof info;
     info.name = "FH2_AutovistaLayer";
-    info.version = "0.3.3";
+    info.version = "0.4.0";
     info.github_repo = "suderek22/FH2_AutovistaLayer";
     info.check_updates = 1;
     info.description = "Includes showroom geometry when the game renders a car at LOD0.";
@@ -482,9 +488,14 @@ FH2MOD_EXPORT int fh2mod_init(const FH2ModApi* api) {
     if (!mod)
         return 1;
     platform = api;
-    if (api->api_version >= 5 && api->add_setting && api->azimuth_dir) {
+    if (api->azimuth_dir && *api->azimuth_dir) {
         settingsPath = std::wstring(api->azimuth_dir) + L"\\fh2-mods\\FH2_AutovistaLayer.ini";
+        autoshowPreview = GetPrivateProfileIntW(L"Autoshow", L"Preview", 0, settingsPath.c_str()) != 0;
         debugLog.store(GetPrivateProfileIntW(L"Logging", L"DebugLog", 0, settingsPath.c_str()) != 0);
+    }
+    if (autoshowPreview && !installAutoshowPrompt(api, mod))
+        api->log(mod, "Could not register the Autoshow Y prompt layout at startup.");
+    if (api->api_version >= 5 && api->add_setting && !settingsPath.empty()) {
         FH2Setting setting{};
         setting.size = sizeof setting;
         setting.key = "DebugLog";
