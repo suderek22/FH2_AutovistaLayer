@@ -12,6 +12,17 @@ FH2_AutovistaLayer brings showroom geometry into Forza Horizon 2 free roam along
 
 The DLL detects LODS geometry as the game loads each car and makes it available at LOD0. When a showroom part has a matching stock counterpart, the mod can suppress the stock part at LOD0 to avoid overlap. It uses the car's existing assets, including assets supplied by other mods, and ships as a single DLL.
 
+## 0.4.0 Autoshow preview
+
+To enable the preview, add this to `fh2-mods\FH2_AutovistaLayer.ini` and restart Azimuth.
+
+```ini
+[Autoshow]
+Preview=1
+```
+
+After choosing the car and its colour, the final purchase preview requests LOD0 with the available showroom geometry. Press **Y** to Explode and press **Y** again to Implode. The preview is disabled by default.
+
 ## Changes in 0.3.3
 
 - Suppressed the McLaren P1's flat `EngineBay_a_LOD0` mesh in gameplay.
@@ -42,6 +53,5 @@ status in the Mods menu. [AutovistaLayer releases](https://github.com/suderek22/
 ## Known issues
 
 - The LaFerrari front-panel rendering issue remains open.
-
 - Some cars are missing LODS parts, so the available showroom detail varies by car.
 - Custom car packs remain untested. The DLL detects LODS geometry in the assets the game loads, so custom cars using FH2's native LODS format are expected to work.
