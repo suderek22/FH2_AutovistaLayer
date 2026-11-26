@@ -1,4 +1,4 @@
-# FH2_AutovistaLayer 0.3.3
+# FH2_AutovistaLayer 0.4.0
 
 **Author** · suderek22
 
@@ -14,14 +14,16 @@ The DLL detects LODS geometry as the game loads each car and makes it available 
 
 ## 0.4.0 Autoshow preview
 
-To enable the preview, add this to `fh2-mods\FH2_AutovistaLayer.ini` and restart Azimuth.
+Autoshow preview is enabled by default. To switch it on or off in game, open **Mods → Your Mods → FH2_AutovistaLayer → Autoshow preview**. Restart the game to apply the change.
+
+The setting is saved in `fh2-mods\FH2_AutovistaLayer.ini`. Use `Preview=0` to switch it off manually.
 
 ```ini
 [Autoshow]
 Preview=1
 ```
 
-After choosing the car and its colour, the final purchase preview requests LOD0 with the available showroom geometry. Press **Y** to Explode and press **Y** again to Implode. The preview is disabled by default.
+After choosing the car and its colour, the final purchase preview requests LOD0 with the available showroom geometry. Press **Y** to Explode and press **Y** again to Implode.
 
 ## Changes in 0.3.3
 
