@@ -13,8 +13,8 @@
 
 #include "fh2mod.h"
 
-void installAutoshowPreview(const FH2ModApi*, FH2Mod*, unsigned char*);
-bool installAutoshowPrompt(const FH2ModApi*, FH2Mod*);
+void installCarPreviews(const FH2ModApi*, FH2Mod*, unsigned char*, bool);
+void installPreviewPrompts(const FH2ModApi*, FH2Mod*, bool);
 
 namespace {
 constexpr std::uintptr_t kParseModelRva = 0x13F1D70;
@@ -43,6 +43,7 @@ constexpr std::uint16_t kLod0 = 2;
 constexpr std::string_view kCarsRoot = "game:\\media\\cars\\";
 constexpr std::string_view kShowroomSuffix = "__slod.modelbin";
 constexpr std::string_view kViperScene = "game:\\media\\cars\\vip_viper_13\\scene\\";
+constexpr std::string_view kEnzoEngine = "game:\\media\\cars\\fer_enzo_02\\scene\\exterior\\engine\\engine_a.modelbin";
 
 #include "ReviewedParts.h"
 
@@ -221,12 +222,15 @@ std::uintptr_t readScene(void* scene, void* reader, void* context) {
                 continue;
 
             auto& mask = *reinterpret_cast<std::uint16_t*>(replacement->record + 0x1D2);
-            mask &= ~kLod0;
+            // The Enzo stock engine also contains bay lining shared with LODS.
+            if (replacement->path != kEnzoEngine)
+                mask &= ~kLod0;
             if (supportsMeshSuppression(replacement->path)) {
                 std::lock_guard<std::mutex> lock(pairedPartMutex);
                 pairedPartAssets.insert(replacement->path);
             }
-            if (debugLog.load() && sceneMessages.fetch_add(1, std::memory_order_relaxed) < 240)
+            if (replacement->path != kEnzoEngine && debugLog.load() &&
+                sceneMessages.fetch_add(1, std::memory_order_relaxed) < 240)
                 logMask("Cleared paired stock LOD0; mask is", replacement->path.c_str(), mask);
         }
     }
@@ -250,10 +254,13 @@ void suppressPairedLod0(unsigned char* model, const char* path) {
         return;
 
     const bool honeycombOnly = isViperPart(path, "exterior\\hood\\hood_a.modelbin");
+    const bool retainEnzoBay = path == kEnzoEngine;
     bool suppressed = false;
     for (std::size_t index = 0; index < count; ++index, mesh += 0x1A0) {
         auto& meshMask = *reinterpret_cast<std::uint16_t*>(mesh + 0x124);
         if (!(meshMask & kLod0))
+            continue;
+        if (retainEnzoBay && (meshMask & kShowroom))
             continue;
         if (honeycombOnly) {
             char name[256];
@@ -264,7 +271,7 @@ void suppressPairedLod0(unsigned char* model, const char* path) {
         meshMask &= ~kLod0;
         suppressed = true;
     }
-    if (!honeycombOnly)
+    if (!honeycombOnly && !retainEnzoBay)
         mask &= ~kLod0;
     if (suppressed && debugLog.load())
         logMask("Suppressed LOD0 meshes in paired model; mask is", path, mask);
@@ -473,8 +480,7 @@ DWORD WINAPI install(void*) {
         return 0;
     }
     platform->log(mod, "Runtime showroom LOD promotion active.");
-    if (autoshowPreview)
-        installAutoshowPreview(platform, mod, game);
+    installCarPreviews(platform, mod, game, autoshowPreview);
     return 0;
 }
 }
@@ -485,7 +491,7 @@ FH2MOD_EXPORT int fh2mod_init(const FH2ModApi* api) {
     FH2ModInfo info{};
     info.size = sizeof info;
     info.name = "FH2_AutovistaLayer";
-    info.version = "0.4.0";
+    info.version = "0.4.1";
     info.github_repo = "suderek22/FH2_AutovistaLayer";
     info.check_updates = 1;
     info.description = "Includes showroom geometry when the game renders a car at LOD0.";
@@ -498,8 +504,7 @@ FH2MOD_EXPORT int fh2mod_init(const FH2ModApi* api) {
         autoshowPreview = GetPrivateProfileIntW(L"Autoshow", L"Preview", 1, settingsPath.c_str()) != 0;
         debugLog.store(GetPrivateProfileIntW(L"Logging", L"DebugLog", 0, settingsPath.c_str()) != 0);
     }
-    if (autoshowPreview && !installAutoshowPrompt(api, mod))
-        api->log(mod, "Could not register the Autoshow Y prompt layout at startup.");
+    installPreviewPrompts(api, mod, autoshowPreview);
     if (api->api_version >= 5 && api->add_setting && !settingsPath.empty()) {
         FH2Setting setting{};
         setting.size = sizeof setting;

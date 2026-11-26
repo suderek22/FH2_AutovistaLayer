@@ -4,18 +4,18 @@ import sys
 from pathlib import Path
 from zipfile import ZipFile
 
-with ZipFile(sys.argv[1]) as archive:
-    layout = archive.read("Scenes/Anthem/A_CarDetails.xaml").decode("utf-8-sig")
-    layout = layout.replace("\r\n", "\n").replace("\r", "\n")
-
 anchor = 'local:ControllerButtonPanel.XDescription="{local:Loc HelpButtons.IDS_ChangeCamera}"'
-assert layout.count(anchor) == 1
-assert "ControllerButtonPanel.YDescription" not in layout
-layout = layout.replace(
-    anchor,
-    anchor + '\n                    local:ControllerButtonPanel.YDescription="{local:Loc HelpButtons.IDS_Explode}"',
-)
-Path(sys.argv[2]).write_text(
-    'constexpr char kCarDetailsLayout[] = R"FH2XAML(' + layout + ')FH2XAML";\n',
-    encoding="utf-8",
-)
+layouts = {"CarDetails": "kCarDetailsLayout", "ViewCar": "kViewCarLayout"}
+headers = []
+with ZipFile(sys.argv[1]) as archive:
+    for scene, variable in layouts.items():
+        layout = archive.read(f"Scenes/Anthem/A_{scene}.xaml").decode("utf-8-sig")
+        layout = layout.replace("\r\n", "\n").replace("\r", "\n")
+        if layout.count(anchor) != 1 or "ControllerButtonPanel.YDescription" in layout:
+            raise ValueError(f"Unexpected button bar in A_{scene}.xaml")
+        layout = layout.replace(
+            anchor,
+            anchor + '\n                    local:ControllerButtonPanel.YDescription="{local:Loc HelpButtons.IDS_Explode}"',
+        )
+        headers.append(f'constexpr char {variable}[] = R"FH2XAML({layout})FH2XAML";\n')
+Path(sys.argv[2]).write_text("".join(headers), encoding="utf-8")
